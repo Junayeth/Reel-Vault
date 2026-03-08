@@ -1,17 +1,19 @@
-from telegram.ext import Application, MessageHandler, CommandHandler, filters
-from telegram import Update
+from telegram.ext import Application, MessageHandler, CommandHandler, CallbackQueryHandler, filters
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from processor import process_reel, answer_question
 from database import save_reel, get_user_reels
 from dotenv import load_dotenv
 import re, os, asyncio
 from flask import Flask, request
+from supabase import create_client
 
 load_dotenv()
 
 INSTAGRAM_RE = re.compile(r'https?://\S+')
 flask_app = Flask(__name__)
 tg_app = None
+sb = create_client(os.getenv('SUPABASE_URL'), os.getenv('SUPABASE_KEY'))
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -25,23 +27,48 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Saved! Analysing your reel... ⏳ (~20 secs)")
         loop = asyncio.get_event_loop()
         result = await loop.run_in_executor(None, process_reel, reel_id, url)
+
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton("📋 Save to my notes", callback_data=f"save_{reel_id}")
+        ]])
+
         await update.message.reply_text(
             f"✅ *{result['title']}*\n\n"
             f"{result['summary']}\n\n"
             f"Tags: {' '.join(['#' + t for t in result.get('tags', [])])}",
-            parse_mode='Markdown'
+            parse_mode='Markdown',
+            reply_markup=keyboard
         )
     else:
         reels = get_user_reels(user_id)
         if not reels:
             await update.message.reply_text(
-                "No reels saved yet! Share an Instagram reel link to this chat."
+                "No reels saved yet! Share a video link to this chat."
             )
             return
         await update.message.reply_text("Searching your reels... 🔍")
         loop = asyncio.get_event_loop()
         answer = await loop.run_in_executor(None, answer_question, text, reels)
         await update.message.reply_text(answer)
+
+
+async def handle_save_note(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    reel_id = query.data.replace("save_", "")
+
+    reel = sb.table('reels').select('*').eq('id', reel_id).execute().data[0]
+
+    await context.bot.send_message(
+        chat_id=query.from_user.id,
+        text=f"📋 *{reel['title']}*\n\n"
+             f"{reel['summary']}\n\n"
+             f"🔗 {reel['url']}\n"
+             f"Tags: {' '.join(['#' + t for t in (reel.get('tags') or [])])}",
+        parse_mode='Markdown'
+    )
+    await query.edit_message_reply_markup(reply_markup=None)
+    await query.message.reply_text("✅ Saved to your Telegram notes!")
 
 
 async def handle_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -59,10 +86,11 @@ async def handle_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "👋 Welcome to ReelsBot!\n\n"
-        "• Share any Instagram reel link to this chat to save it\n"
+        "👋 Welcome to Reel Vault!\n\n"
+        "• Share any video link to this chat to save it\n"
         "• Ask me anything about your saved reels\n"
-        "• Use /list to see all saved reels"
+        "• Use /list to see all saved reels\n"
+        "• Tap 📋 after any summary to save it to your Telegram notes"
     )
 
 
@@ -89,6 +117,7 @@ def main():
     tg_app = Application.builder().token(token).build()
     tg_app.add_handler(CommandHandler("start", handle_start))
     tg_app.add_handler(CommandHandler("list", handle_list))
+    tg_app.add_handler(CallbackQueryHandler(handle_save_note))
     tg_app.add_handler(MessageHandler(filters.TEXT, handle_message))
 
     asyncio.run(tg_app.bot.set_webhook(f"{webhook_url}/webhook"))
@@ -99,4 +128,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-  
