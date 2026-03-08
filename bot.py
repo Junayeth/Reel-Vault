@@ -13,6 +13,8 @@ load_dotenv()
 INSTAGRAM_RE = re.compile(r'https?://\S+')
 flask_app = Flask(__name__)
 tg_app = None
+loop = asyncio.new_event_loop()
+asyncio.set_event_loop(loop)
 sb = create_client(os.getenv('SUPABASE_URL'), os.getenv('SUPABASE_KEY'))
 
 
@@ -25,8 +27,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         url = match.group()
         reel_id = save_reel(user_id, url)
         await update.message.reply_text("Saved! Analysing your reel... ⏳ (~20 secs)")
-        loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(None, process_reel, reel_id, url)
+        result = await asyncio.get_event_loop().run_in_executor(None, process_reel, reel_id, url)
 
         keyboard = InlineKeyboardMarkup([[
             InlineKeyboardButton("📋 Save to my notes", callback_data=f"save_{reel_id}")
@@ -47,8 +48,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         await update.message.reply_text("Searching your reels... 🔍")
-        loop = asyncio.get_event_loop()
-        answer = await loop.run_in_executor(None, answer_question, text, reels)
+        answer = await asyncio.get_event_loop().run_in_executor(None, answer_question, text, reels)
         await update.message.reply_text(answer)
 
 
@@ -96,11 +96,8 @@ async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @flask_app.route("/webhook", methods=["POST"])
 def webhook():
-    asyncio.run(
-        tg_app.process_update(
-            Update.de_json(request.get_json(), tg_app.bot)
-        )
-    )
+    update = Update.de_json(request.get_json(), tg_app.bot)
+    loop.run_until_complete(tg_app.process_update(update))
     return "ok"
 
 
@@ -111,6 +108,7 @@ def health():
 
 def main():
     global tg_app
+
     token = os.getenv('TELEGRAM_TOKEN')
     webhook_url = os.getenv('WEBHOOK_URL')
 
@@ -120,14 +118,12 @@ def main():
     tg_app.add_handler(CallbackQueryHandler(handle_save_note))
     tg_app.add_handler(MessageHandler(filters.TEXT, handle_message))
 
-    async def init():
-        await tg_app.initialize()
-        await tg_app.bot.set_webhook(f"{webhook_url}/webhook")
-
-    asyncio.run(init())
+    loop.run_until_complete(tg_app.initialize())
+    loop.run_until_complete(tg_app.bot.set_webhook(f"{webhook_url}/webhook"))
 
     port = int(os.environ.get("PORT", 10000))
     flask_app.run(host="0.0.0.0", port=port)
+
 
 if __name__ == '__main__':
     main()
