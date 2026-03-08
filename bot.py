@@ -120,11 +120,14 @@ def main():
     tg_app.add_handler(CallbackQueryHandler(handle_save_note))
     tg_app.add_handler(MessageHandler(filters.TEXT, handle_message))
 
-    asyncio.run(tg_app.bot.set_webhook(f"{webhook_url}/webhook"))
+    async def init():
+        await tg_app.initialize()
+        await tg_app.bot.set_webhook(f"{webhook_url}/webhook")
+
+    asyncio.run(init())
 
     port = int(os.environ.get("PORT", 10000))
     flask_app.run(host="0.0.0.0", port=port)
-
 
 if __name__ == '__main__':
     main()
