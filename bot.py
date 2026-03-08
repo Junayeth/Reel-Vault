@@ -9,7 +9,7 @@ from flask import Flask, request
 
 load_dotenv()
 
-INSTAGRAM_RE = re.compile(r'https?://(www\.)?instagram\.com/reel/\S+')
+INSTAGRAM_RE = re.compile(r'https?://\S+')
 flask_app = Flask(__name__)
 tg_app = None
 
