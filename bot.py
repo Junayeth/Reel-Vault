@@ -1,97 +1,153 @@
-from telegram.ext import Application, MessageHandler, CommandHandler, CallbackQueryHandler, filters
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, MessageHandler, CommandHandler, filters
+from telegram import Update
 from telegram.ext import ContextTypes
-from processor import process_reel, answer_question
-from database import save_reel, get_user_reels
 from dotenv import load_dotenv
-import re, os, asyncio
+from apscheduler.schedulers.background import BackgroundScheduler
+from database import save_reminder, get_due_reminders, mark_reminder_sent, get_user_reminders
+import google.generativeai as genai
+import os, asyncio, json
 from flask import Flask, request
-from supabase import create_client
+from datetime import datetime, timezone
 
 load_dotenv()
 
-INSTAGRAM_RE = re.compile(r'https?://\S+')
+genai.configure(api_key=os.getenv('GEMINI_API_KEY'))
+model = genai.GenerativeModel(
+    "gemini-1.5-flash",
+    system_instruction="""You are a helpful AI assistant in Telegram. You can:
+- Answer any question clearly and concisely
+- Summarise articles, text or documents the user pastes
+- Draft messages, emails or any written content
+- Help with research and explain complex topics
+- Help with productivity and planning
+
+Keep responses concise and well formatted for Telegram.
+Use *bold* for emphasis and keep paragraphs short.
+If the user pastes a long text, summarise it unless they ask otherwise.
+
+IMPORTANT — Reminder detection:
+If the user is asking you to remind them of something, respond ONLY with a JSON object like this:
+{
+  "type": "reminder",
+  "message": "what to remind them about",
+  "remind_at": "ISO 8601 datetime in UTC e.g. 2026-03-09T15:00:00Z"
+}
+Current UTC time is: """ + datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") + """
+If the user asks to see their reminders, respond with just: {"type": "list_reminders"}
+For everything else respond normally as a helpful assistant."""
+)
+
 flask_app = Flask(__name__)
 tg_app = None
 loop = asyncio.new_event_loop()
 asyncio.set_event_loop(loop)
-sb = create_client(os.getenv('SUPABASE_URL'), os.getenv('SUPABASE_KEY'))
+conversations = {}
+
+
+def get_chat(user_id):
+    if user_id not in conversations:
+        conversations[user_id] = model.start_chat(history=[])
+    return conversations[user_id]
+
+
+def check_reminders():
+    """Runs every minute — sends due reminders"""
+    due = get_due_reminders()
+    for reminder in due:
+        try:
+            asyncio.run_coroutine_threadsafe(
+                tg_app.bot.send_message(
+                    chat_id=reminder['user_id'],
+                    text=f"⏰ *Reminder:* {reminder['message']}",
+                    parse_mode='Markdown'
+                ),
+                loop
+            ).result(timeout=10)
+            mark_reminder_sent(reminder['id'])
+        except Exception as e:
+            print(f"Failed to send reminder: {e}")
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text or ''
     user_id = str(update.effective_user.id)
-    match = INSTAGRAM_RE.search(text)
 
-    if match:
-        url = match.group()
-        reel_id = save_reel(user_id, url)
-        await update.message.reply_text("Saved! Analysing your reel... ⏳ (~20 secs)")
-        result = await asyncio.get_event_loop().run_in_executor(None, process_reel, reel_id, url)
+    await context.bot.send_chat_action(
+        chat_id=update.effective_chat.id,
+        action="typing"
+    )
 
-        keyboard = InlineKeyboardMarkup([[
-            InlineKeyboardButton("📋 Save to my notes", callback_data=f"save_{reel_id}")
-        ]])
-
-        await update.message.reply_text(
-            f"✅ *{result['title']}*\n\n"
-            f"{result['summary']}\n\n"
-            f"Tags: {' '.join(['#' + t for t in result.get('tags', [])])}",
-            parse_mode='Markdown',
-            reply_markup=keyboard
+    try:
+        chat = get_chat(user_id)
+        response = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: chat.send_message(text)
         )
-    else:
-        reels = get_user_reels(user_id)
-        if not reels:
-            await update.message.reply_text(
-                "No reels saved yet! Share a video link to this chat."
-            )
-            return
-        await update.message.reply_text("Searching your reels... 🔍")
-        answer = await asyncio.get_event_loop().run_in_executor(None, answer_question, text, reels)
-        await update.message.reply_text(answer)
+        reply = response.text.strip()
 
+        # Check if Gemini returned a reminder JSON
+        if reply.startswith('{'):
+            try:
+                data = json.loads(reply)
 
-async def handle_save_note(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    reel_id = query.data.replace("save_", "")
+                if data.get('type') == 'reminder':
+                    save_reminder(user_id, data['message'], data['remind_at'])
+                    # Format time nicely for confirmation
+                    remind_time = datetime.fromisoformat(data['remind_at'].replace('Z', '+00:00'))
+                    formatted = remind_time.strftime("%A %d %B at %H:%M UTC")
+                    await update.message.reply_text(
+                        f"✅ I'll remind you: *{data['message']}*\n📅 {formatted}",
+                        parse_mode='Markdown'
+                    )
+                    return
 
-    reel = sb.table('reels').select('*').eq('id', reel_id).execute().data[0]
+                elif data.get('type') == 'list_reminders':
+                    reminders = get_user_reminders(user_id)
+                    if not reminders:
+                        await update.message.reply_text("You have no upcoming reminders.")
+                        return
+                    lines = []
+                    for r in reminders:
+                        t = datetime.fromisoformat(r['remind_at'].replace('Z', '+00:00'))
+                        lines.append(f"• *{r['message']}* — {t.strftime('%a %d %b at %H:%M UTC')}")
+                    await update.message.reply_text(
+                        "📋 *Your reminders:*\n\n" + "\n".join(lines),
+                        parse_mode='Markdown'
+                    )
+                    return
 
-    await context.bot.send_message(
-        chat_id=query.from_user.id,
-        text=f"📋 *{reel['title']}*\n\n"
-             f"{reel['summary']}\n\n"
-             f"🔗 {reel['url']}\n"
-             f"Tags: {' '.join(['#' + t for t in (reel.get('tags') or [])])}",
-        parse_mode='Markdown'
-    )
-    await query.edit_message_reply_markup(reply_markup=None)
-    await query.message.reply_text("✅ Saved to your Telegram notes!")
+            except json.JSONDecodeError:
+                pass  # Not JSON, treat as normal reply
 
+        await update.message.reply_text(reply, parse_mode='Markdown')
 
-async def handle_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = str(update.effective_user.id)
-    reels = get_user_reels(user_id)
-    if not reels:
-        await update.message.reply_text("No reels saved yet!")
-        return
-    lines = [f"{i+1}. *{r['title']}* — {r['category']}" for i, r in enumerate(reels)]
-    await update.message.reply_text(
-        "Your saved reels:\n\n" + "\n".join(lines),
-        parse_mode='Markdown'
-    )
+    except Exception as e:
+        await update.message.reply_text(
+            "Sorry, something went wrong. Try again or use /clear to reset."
+        )
+        print(f"Error: {e}")
 
 
 async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    conversations.pop(user_id, None)
     await update.message.reply_text(
-        "👋 Welcome to Reel Vault!\n\n"
-        "• Share any video link to this chat to save it\n"
-        "• Ask me anything about your saved reels\n"
-        "• Use /list to see all saved reels\n"
-        "• Tap 📋 after any summary to save it to your Telegram notes"
+        "👋 Hi! I'm your AI assistant.\n\n"
+        "I can help you with:\n"
+        "• *Answering questions* — just ask\n"
+        "• *Summarising* — paste any text or article\n"
+        "• *Drafting* — ask me to write emails, messages etc\n"
+        "• *Research* — ask me to explain anything\n"
+        "• *Reminders* — \"Remind me to call John tomorrow at 3pm\"\n\n"
+        "Just type anything to get started.\n"
+        "Use /clear to start a fresh conversation.",
+        parse_mode='Markdown'
     )
+
+
+async def handle_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    conversations.pop(user_id, None)
+    await update.message.reply_text("✅ Conversation cleared. Starting fresh!")
 
 
 @flask_app.route("/webhook", methods=["POST"])
@@ -108,18 +164,21 @@ def health():
 
 def main():
     global tg_app
-
     token = os.getenv('TELEGRAM_TOKEN')
     webhook_url = os.getenv('WEBHOOK_URL')
 
     tg_app = Application.builder().token(token).build()
     tg_app.add_handler(CommandHandler("start", handle_start))
-    tg_app.add_handler(CommandHandler("list", handle_list))
-    tg_app.add_handler(CallbackQueryHandler(handle_save_note))
+    tg_app.add_handler(CommandHandler("clear", handle_clear))
     tg_app.add_handler(MessageHandler(filters.TEXT, handle_message))
 
     loop.run_until_complete(tg_app.initialize())
     loop.run_until_complete(tg_app.bot.set_webhook(f"{webhook_url}/webhook"))
+
+    # Start reminder scheduler
+    scheduler = BackgroundScheduler()
+    scheduler.add_job(check_reminders, 'interval', minutes=1)
+    scheduler.start()
 
     port = int(os.environ.get("PORT", 10000))
     flask_app.run(host="0.0.0.0", port=port)
