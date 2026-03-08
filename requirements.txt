@@ -1,7 +1,6 @@
 python-telegram-bot[webhooks]==20.7
 google-generativeai==0.5.4
 supabase==2.9.0
-httpx==0.25.0
 yt-dlp==2024.3.10
 python-dotenv==1.0.1
 flask==3.0.3
