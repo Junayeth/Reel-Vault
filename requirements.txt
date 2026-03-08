@@ -1,6 +1,6 @@
 python-telegram-bot[webhooks]==21.3
 google-generativeai==0.5.4
 supabase==2.9.0
-yt-dlp==2024.3.10
 python-dotenv==1.0.1
 flask==3.0.3
+apscheduler==3.10.4
