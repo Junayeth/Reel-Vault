@@ -97,7 +97,7 @@ async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @flask_app.route("/webhook", methods=["POST"])
 def webhook():
     asyncio.run(
-        tg_app.update_queue.put(
+        tg_app.process_update(
             Update.de_json(request.get_json(), tg_app.bot)
         )
     )
