@@ -14,9 +14,13 @@ load_dotenv()
 
 genai.configure(api_key=os.getenv('GEMINI_API_KEY'))
 
+now = datetime.now(timezone.utc)
+
 model = genai.GenerativeModel(
     "gemini-1.5-flash",
-    system_instruction="""Always respond in the same language the user writes in. If they write in Bangla, respond in Bangla. If English, respond in English. You can handle both in the same conversation.
+    system_instruction=f"""Always respond in the same language the user writes in. If they write in Bangla, respond in Bangla. If English, respond in English. You can handle both in the same conversation.
+
+Today's date is {now.strftime("%A, %d %B %Y")} and the current UTC time is {now.strftime("%H:%M")}.
 
 You are a powerful AI assistant on Telegram. You can:
 - Answer any question using your knowledge
@@ -29,16 +33,17 @@ Formatting rules:
 - Use *bold* for key points
 - Keep paragraphs short — this is Telegram not a document
 - If the user pastes a long text without instructions, summarise it
+- Avoid using special characters like brackets, underscores or dashes in formatting
 
 IMPORTANT — Reminder detection:
 If the user wants a reminder, respond ONLY with JSON:
-{
+{{
   "type": "reminder",
   "message": "what to remind them",
   "remind_at": "ISO 8601 UTC datetime e.g. 2026-03-09T15:00:00Z"
-}
-Current UTC time: """ + datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") + """
-If they ask to see reminders: {"type": "list_reminders"}
+}}
+Current UTC time: {now.strftime("%Y-%m-%dT%H:%M:%SZ")}
+If they ask to see reminders: {{"type": "list_reminders"}}
 For everything else respond normally."""
 )
 
@@ -64,8 +69,7 @@ def check_reminders():
             asyncio.run_coroutine_threadsafe(
                 tg_app.bot.send_message(
                     chat_id=reminder['user_id'],
-                    text=f"⏰ *Reminder:* {reminder['message']}",
-                    parse_mode='Markdown'
+                    text=f"⏰ Reminder: {reminder['message']}",
                 ),
                 loop
             ).result(timeout=10)
@@ -86,8 +90,7 @@ async def process_reply(update, reply, user_id):
                 t = datetime.fromisoformat(data['remind_at'].replace('Z', '+00:00'))
                 formatted = t.strftime("%A %d %B at %H:%M UTC")
                 await update.message.reply_text(
-                    f"✅ Reminder set: *{data['message']}*\n📅 {formatted}",
-                    parse_mode='Markdown'
+                    f"✅ Reminder set: {data['message']}\n📅 {formatted}"
                 )
                 return
 
@@ -99,21 +102,22 @@ async def process_reply(update, reply, user_id):
                 lines = []
                 for r in reminders:
                     t = datetime.fromisoformat(r['remind_at'].replace('Z', '+00:00'))
-                    lines.append(f"• *{r['message']}* — {t.strftime('%a %d %b at %H:%M UTC')}")
+                    lines.append(f"• {r['message']} — {t.strftime('%a %d %b at %H:%M UTC')}")
                 await update.message.reply_text(
-                    "📋 *Your reminders:*\n\n" + "\n".join(lines),
-                    parse_mode='Markdown'
+                    "📋 Your reminders:\n\n" + "\n".join(lines)
                 )
                 return
 
         except json.JSONDecodeError:
             pass
 
-    if len(reply) > 4096:
-        for i in range(0, len(reply), 4096):
-            await update.message.reply_text(reply[i:i+4096], parse_mode='Markdown')
-    else:
-        await update.message.reply_text(reply, parse_mode='Markdown')
+    # Split long replies and try Markdown, fall back to plain text
+    chunks = [reply[i:i+4096] for i in range(0, len(reply), 4096)]
+    for chunk in chunks:
+        try:
+            await update.message.reply_text(chunk, parse_mode='Markdown')
+        except Exception:
+            await update.message.reply_text(chunk)
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -129,7 +133,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         await process_reply(update, response.text, user_id)
     except Exception as e:
-        await update.message.reply_text("Sorry, something went wrong. Try again or use /clear.")
+        await update.message.reply_text(
+            "Sorry, I couldn't complete that. Please try again."
+        )
         print(f"Text error: {e}")
 
 
@@ -187,16 +193,15 @@ async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 Hi! I'm your AI assistant.\n\n"
         "Here's what I can do:\n\n"
-        "💬 *Chat & Q&A* — ask me anything\n"
-        "📝 *Summarise* — paste any text or article\n"
-        "✍️ *Draft* — emails, messages, posts\n"
-        "🖼 *Analyse images* — send me any photo\n"
-        "📄 *Read files* — send a text document\n"
-        "⏰ *Reminders* — \"Remind me to call John at 3pm\"\n"
-        "📋 *List reminders* — \"Show my reminders\"\n\n"
-        "I also speak Bangla 🇧🇩 — just write in Bangla and I'll reply in Bangla.\n\n"
-        "Use /clear to start a fresh conversation.",
-        parse_mode='Markdown'
+        "💬 Chat and Q&A — ask me anything\n"
+        "📝 Summarise — paste any text or article\n"
+        "✍️ Draft — emails, messages, posts\n"
+        "🖼 Analyse images — send me any photo\n"
+        "📄 Read files — send a text document\n"
+        "⏰ Reminders — say Remind me to call John at 3pm\n"
+        "📋 List reminders — say Show my reminders\n\n"
+        "I also speak Bangla 🇧🇩\n\n"
+        "Use /clear to start a fresh conversation."
     )
 
 
@@ -208,16 +213,15 @@ async def handle_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "*Commands:*\n"
+        "Commands:\n"
         "/start — Welcome message\n"
         "/clear — Reset conversation\n"
         "/help — Show this message\n\n"
-        "*Tips:*\n"
+        "Tips:\n"
         "• Send a photo with a question as caption\n"
         "• Paste long text and I'll summarise it\n"
-        "• Say *\"remind me to...\"* to set a reminder\n"
-        "• Write in Bangla and I'll reply in Bangla",
-        parse_mode='Markdown'
+        "• Say remind me to set a reminder\n"
+        "• Write in Bangla and I'll reply in Bangla"
     )
 
 
