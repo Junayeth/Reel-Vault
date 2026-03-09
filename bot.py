@@ -14,17 +14,12 @@ load_dotenv()
 
 genai.configure(api_key=os.getenv('GEMINI_API_KEY'))
 
-# Model with Google Search grounding enabled
-search_tool = genai.protos.Tool(
-    google_search_retrieval=genai.protos.GoogleSearchRetrieval()
-)
-
 model = genai.GenerativeModel(
     "gemini-1.5-flash",
     system_instruction="""Always respond in the same language the user writes in. If they write in Bangla, respond in Bangla. If English, respond in English. You can handle both in the same conversation.
 
 You are a powerful AI assistant on Telegram. You can:
-- Answer any question using your knowledge or Google Search
+- Answer any question using your knowledge
 - Summarise text, articles or documents
 - Draft messages, emails or any content
 - Analyse images sent by the user
@@ -34,7 +29,6 @@ Formatting rules:
 - Use *bold* for key points
 - Keep paragraphs short — this is Telegram not a document
 - If the user pastes a long text without instructions, summarise it
-- When you search the web, mention that you searched and cite sources briefly
 
 IMPORTANT — Reminder detection:
 If the user wants a reminder, respond ONLY with JSON:
@@ -48,7 +42,6 @@ If they ask to see reminders: {"type": "list_reminders"}
 For everything else respond normally."""
 )
 
-# Vision model for images (no search tool needed)
 vision_model = genai.GenerativeModel("gemini-1.5-flash")
 
 flask_app = Flask(__name__)
@@ -82,7 +75,6 @@ def check_reminders():
 
 
 async def process_reply(update, reply, user_id):
-    """Handle Gemini response — check for reminder JSON or send as text"""
     reply = reply.strip()
 
     if reply.startswith('{'):
@@ -117,7 +109,6 @@ async def process_reply(update, reply, user_id):
         except json.JSONDecodeError:
             pass
 
-    # Telegram has a 4096 char limit — split if needed
     if len(reply) > 4096:
         for i in range(0, len(reply), 4096):
             await update.message.reply_text(reply[i:i+4096], parse_mode='Markdown')
@@ -126,7 +117,6 @@ async def process_reply(update, reply, user_id):
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle text messages"""
     text = update.message.text or ''
     user_id = str(update.effective_user.id)
 
@@ -144,25 +134,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle photos sent by the user"""
     user_id = str(update.effective_user.id)
     caption = update.message.caption or "Analyse this image and describe what you see in detail."
 
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
 
     try:
-        # Download the photo from Telegram
-        photo = update.message.photo[-1]  # highest resolution
+        photo = update.message.photo[-1]
         file = await context.bot.get_file(photo.file_id)
         img_bytes = await file.download_as_bytearray()
-
-        # Open with Pillow and send to Gemini
         img = Image.open(io.BytesIO(img_bytes))
 
         response = await asyncio.get_event_loop().run_in_executor(
             None, lambda: vision_model.generate_content([img, caption])
         )
-
         await process_reply(update, response.text, user_id)
 
     except Exception as e:
@@ -171,7 +156,6 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle documents — summarise text files"""
     user_id = str(update.effective_user.id)
 
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
@@ -181,7 +165,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if doc.mime_type and 'text' in doc.mime_type:
             file = await context.bot.get_file(doc.file_id)
             file_bytes = await file.download_as_bytearray()
-            text = file_bytes.decode('utf-8', errors='ignore')[:8000]  # cap at 8k chars
+            text = file_bytes.decode('utf-8', errors='ignore')[:8000]
 
             chat = get_chat(user_id)
             response = await asyncio.get_event_loop().run_in_executor(
@@ -204,14 +188,13 @@ async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "👋 Hi! I'm your AI assistant.\n\n"
         "Here's what I can do:\n\n"
         "💬 *Chat & Q&A* — ask me anything\n"
-        "🌐 *Web Search* — ask me to search for latest news or info\n"
         "📝 *Summarise* — paste any text or article\n"
         "✍️ *Draft* — emails, messages, posts\n"
         "🖼 *Analyse images* — send me any photo\n"
         "📄 *Read files* — send a text document\n"
         "⏰ *Reminders* — \"Remind me to call John at 3pm\"\n"
         "📋 *List reminders* — \"Show my reminders\"\n\n"
-        "Just type, send a photo, or share a file to get started.\n"
+        "I also speak Bangla 🇧🇩 — just write in Bangla and I'll reply in Bangla.\n\n"
         "Use /clear to start a fresh conversation.",
         parse_mode='Markdown'
     )
@@ -230,10 +213,10 @@ async def handle_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/clear — Reset conversation\n"
         "/help — Show this message\n\n"
         "*Tips:*\n"
-        "• Ask me to *search* for something to get latest results\n"
         "• Send a photo with a question as caption\n"
         "• Paste long text and I'll summarise it\n"
-        "• Say *\"remind me to...\"* to set a reminder",
+        "• Say *\"remind me to...\"* to set a reminder\n"
+        "• Write in Bangla and I'll reply in Bangla",
         parse_mode='Markdown'
     )
 
