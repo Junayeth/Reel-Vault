@@ -21,7 +21,6 @@ search_tool = genai.protos.Tool(
 
 model = genai.GenerativeModel(
     "gemini-1.5-flash",
-    tools=[search_tool],
     system_instruction="""Always respond in the same language the user writes in. If they write in Bangla, respond in Bangla. If English, respond in English. You can handle both in the same conversation.
 
 You are a powerful AI assistant on Telegram. You can:
